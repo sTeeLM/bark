@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bark-notifier"
+version = "0.1.0"
+description = "A system-wide Bark notification library and CLI tool."
+readme = "README.md"
+requires-python = ">=3.6"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [] # 纯原生，零外部依赖
+
+# 关键：这一步会自动在 Linux 的 /usr/local/bin 生成可执行的 bark-cli 命令
+[project.scripts]
+bark-cli = "bark_notifier.cli:main"
+
+[tool.setuptools.package-data]
+bark_notifier = ["*.conf"]  # 包含 bark.conf
