@@ -1,6 +1,7 @@
 dist/
-*.egg-info/
-
-# Python cache
+build/
+src/*.egg-info/
+.eggs/
 __pycache__/
 *.pyc
+

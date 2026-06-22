@@ -4,33 +4,35 @@ import json
 import configparser
 import urllib.request
 import urllib.error
-from importlib.resources import files
 
 class BarkNotifier:
     def __init__(self, key=None, server=None, title=None, group=None, sound=None, level=None):
-        # 1. Safely locate the installed bark.conf within site-packages
+        # 1. Define the system global configuration path
+        config_path = "/etc/bark/bark.conf"
+        config = configparser.ConfigParser()
         conf_data = {}
-        try:
-            config_path = files('bark_notifier').joinpath('bark.conf')
-            if config_path.is_file():
-                config = configparser.ConfigParser()
-                # Read via string or file context to ensure cross-platform compatibility
-                config.read_string(config_path.read_text(encoding='utf-8'))
+        
+        # 2. Check if the configuration file exists in /etc/bark/
+        if os.path.exists(config_path):
+            try:
+                config.read(config_path, encoding='utf-8')
                 if 'DEFAULT' in config:
                     conf_data = config['DEFAULT']
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        # 2. Priority: Explicit Argument > Configuration File
+        # 3. Parameter priority: Explicit CLI Argument > /etc/bark/bark.conf
         raw_key = key or conf_data.get("key", "")
         self.key = raw_key.strip() if raw_key else ""
 
-        # 3. Enforce validation: Raise ValueError if the final Key is empty
+        # 4. Enforce validation: Raise ValueError if the final Key is empty
         if not self.key:
-            installed_path = str(files('bark_notifier').joinpath('bark.conf'))
-            raise ValueError(f"Error: Bark Device Key is empty. Please configure it in: {installed_path}")
+            raise ValueError(
+                f"Error: Bark Device Key is empty. "
+                f"Please ensure the config file exists and contains a valid key at: {config_path}"
+            )
 
-        # 4. Initialize other parameters
+        # 5. Initialize other fallback parameters from config or default values
         self.server = server or conf_data.get("server", "https://day.app")
         self.title = title or conf_data.get("title", "Server Notification")
         self.group = group or conf_data.get("group", "Default")

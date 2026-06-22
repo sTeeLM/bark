@@ -20,3 +20,6 @@ bark-cli = "bark_notifier.cli:main"
 
 [tool.setuptools.package-data]
 bark_notifier = ["*.conf"]  # 包含 bark.conf
+
+[tool.setuptools.data-files]
+"etc/bark" = ["src/bark_notifier/bark.conf"]
