@@ -12,17 +12,27 @@ def main():
 
     # 2. Add subparsers for 'send' and 'delete'
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
-    subparsers.required = True  # Enforce the user to choose either 'send' or 'delete'
+    subparsers.required = True
 
     # ==================== SUBCOMMAND: SEND ====================
     send_parser = subparsers.add_parser("send", help="Send or update a full-featured notification")
 
-    # 🌟 Required positional argument: If missing, argparse throws error and exits immediately
+    # Required positional argument for the message body
     send_parser.add_argument("body", type=str, help="Notification message body")
 
-    # Optional arguments for 'send'
+    # Core config overrides
     send_parser.add_argument("-k", "--key", type=str, default=None, help="Override Bark Device Key")
     send_parser.add_argument("--server", type=str, default=None, help="Override Bark server URL")
+    send_parser.add_argument("-v", "--verbose", action="store_true", help="Print the final outbound JSON payload before transmitting")
+
+    # Advanced encryption overrides via CLI
+    send_parser.add_argument("--encryption", type=str, default=None, choices=["true", "false"], help="Override encryption toggle")
+    send_parser.add_argument("--enc-key", type=str, default=None, help="Override encryption key string")
+    send_parser.add_argument("--enc-iv", type=str, default=None, help="Override initialization vector")
+    send_parser.add_argument("--enc-algo", type=str, default=None, choices=["aes128", "aes192", "aes256"], help="Override encryption algorithm")
+    send_parser.add_argument("--enc-mode", type=str, default=None, choices=["cbc", "ecb", "gcm"], help="Override encryption mechanism")
+
+    # Advanced official Bark V2 notification parameters
     send_parser.add_argument("-t", "--title", type=str, default=None, help="Notification title")
     send_parser.add_argument("-g", "--group", type=str, default=None, help="Notification group name")
     send_parser.add_argument("-s", "--sound", type=str, default=None, help="Notification sound filename")
@@ -45,16 +55,28 @@ def main():
     # Required positional argument for 'delete'
     delete_parser.add_argument("id", type=str, help="The unique message ID to be recalled")
 
-    # Optional arguments for 'delete'
+    # Core config overrides
     delete_parser.add_argument("-k", "--key", type=str, default=None, help="Override Bark Device Key")
     delete_parser.add_argument("--server", type=str, default=None, help="Override Bark server URL")
+    delete_parser.add_argument("-v", "--verbose", action="store_true", help="Print the final outbound JSON payload before transmitting")
 
-    # 3. Parse inputs (Natively blocks when required arguments are omitted)
+    # 3. Parse inputs according to strict subcommand positioning
     args = parser.parse_args()
 
-    # 4. Instantiate core library with parameter context
+    # 4. Instantiate core library with full parameter context (Supports file config fallback)
     try:
-        notifier = BarkNotifier(key=args.key, server=args.server)
+        if args.command == "send":
+            notifier = BarkNotifier(
+                key=args.key,
+                server=args.server,
+                encryption=args.encryption,
+                enc_key=args.enc_key,
+                enc_iv=args.enc_iv,
+                enc_algo=args.enc_algo,
+                enc_mode=args.enc_mode
+            )
+        else:
+            notifier = BarkNotifier(key=args.key, server=args.server)
     except ValueError as err:
         print(err, file=sys.stderr)
         sys.exit(1)
@@ -77,11 +99,15 @@ def main():
             volume=args.volume,
             call=args.call,
             ttl=args.ttl,
-            msg_id=args.id
+            msg_id=args.id,
+            verbose=args.verbose
         )
 
     elif args.command == "delete":
-        success, message = notifier.delete(msg_id=args.id)
+        success, message = notifier.delete(
+            msg_id=args.id,
+            verbose=args.verbose
+        )
 
     # 6. Print uniform exit output
     if success:

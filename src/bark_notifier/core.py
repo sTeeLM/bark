@@ -4,9 +4,11 @@ import json
 import configparser
 import urllib.request
 import urllib.error
+import subprocess
 
 class BarkNotifier:
-    def __init__(self, key=None, server=None, title=None, group=None, sound=None, level=None, icon=None):
+    def __init__(self, key=None, server=None, title=None, group=None, sound=None, level=None,
+                 encryption=None, enc_key=None, enc_iv=None, enc_algo=None, enc_mode=None):
         config_path = "/etc/bark/bark.conf"
         config = configparser.ConfigParser()
         conf_data = {}
@@ -32,24 +34,78 @@ class BarkNotifier:
         self.title = title or conf_data.get("title", "Server Notification")
         self.group = group or conf_data.get("group", "Default")
         self.sound = sound or conf_data.get("sound", "chimes")
-        self.icon = icon or conf_data.get("icon", "")
 
         raw_level = level or conf_data.get("level", "active")
         self.level = "timeSensitive" if raw_level == "time_sensitive" else raw_level
 
-    def send(self, body, title=None, group=None, msg_id=None, sound=None, level=None, icon=None,
-             url=None, is_archive=None, badge=None, volume=None, call=False, ttl=None,
-             ciphertext=None, iv=None):
-        """
-        Send a full-featured Bark notification.
-        Supports all arguments defined in the official Bark documentation.
-        """
+        raw_enc = encryption or conf_data.get("encryption", "false")
+        self.encryption = str(raw_enc).strip().lower() in ("true", "1", "yes", "on")
+
+        self.enc_key = enc_key or conf_data.get("encryption_key", "")
+        self.enc_iv = enc_iv or conf_data.get("iv", "")
+        self.enc_algo = (enc_algo or conf_data.get("encryption_algorithm", "aes256")).strip().lower()
+        self.enc_mode = (enc_mode or conf_data.get("encryption_mechanism", "cbc")).strip().lower()
+
+        if self.encryption:
+            algo_key_lengths = {
+                "aes128": 16,
+                "aes192": 24,
+                "aes256": 32
+            }
+
+            if self.enc_algo not in algo_key_lengths:
+                raise ValueError(f"Error: Unsupported encryption_algorithm '{self.enc_algo}'. Must be aes128, aes192, or aes256.")
+
+            expected_key_len = algo_key_lengths[self.enc_algo]
+            actual_key_len = len(self.enc_key.encode('utf-8'))
+
+            if actual_key_len != expected_key_len:
+                raise ValueError(f"Error: Encryption key for '{self.enc_algo}' must be exactly {expected_key_len} bytes long. Current length: {actual_key_len} bytes.")
+
+            if self.enc_mode != "ecb":
+                expected_iv_len = 16
+                actual_iv_len = len(self.enc_iv.encode('utf-8'))
+                if actual_iv_len != expected_iv_len:
+                    raise ValueError(f"Error: IV for '{self.enc_mode}' mode must be exactly {expected_iv_len} bytes long. Current length: {actual_iv_len} bytes.")
+
+    def _encrypt_payload(self, plaintext_json):
+        algo_mapping = {"aes128": "aes-128", "aes192": "aes-192", "aes256": "aes-256"}
+        base_algo = algo_mapping.get(self.enc_algo, "aes-256")
+        openssl_cipher = f"-{base_algo}-{self.enc_mode}"
+
+        has_iv = self.enc_mode != "ecb"
+        hex_key = self.enc_key.encode('utf-8').hex()
+        hex_iv = self.enc_iv.encode('utf-8').hex() if has_iv else ""
+
+        cmd = ["openssl", "enc", openssl_cipher, "-K", hex_key]
+        if has_iv and hex_iv:
+            cmd.extend(["-iv", hex_iv])
+        cmd.extend(["-base64", "-A"])
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout_bytes, stderr_bytes = proc.communicate(input=plaintext_json.encode('utf-8'))
+
+            if proc.returncode != 0:
+                raise RuntimeError(f"OpenSSL internal crash: {stderr_bytes.decode('utf-8').strip()}")
+
+            return stdout_bytes.decode('utf-8').strip()
+        except Exception as err:
+            raise RuntimeError(f"Failed to execute cryptography subsystem: {err}")
+
+    def send(self, body, title=None, group=None, sound=None, level=None, icon=None,
+             url=None, is_archive=None, badge=None, volume=None, call=False, ttl=None, msg_id=None,
+             verbose=False):
+
         raw_level = level or self.level
         final_level = "timeSensitive" if raw_level == "time_sensitive" else raw_level
 
-        # 1. Base required payload properties
-        payload = {
-            "device_key": self.key,
+        inner_payload = {
             "title": title or self.title,
             "body": str(body),
             "group": group or self.group,
@@ -57,58 +113,38 @@ class BarkNotifier:
             "level": final_level
         }
 
-        # 2. Custom Icon URL
-        final_icon = icon or self.icon
-        if final_icon:
-            payload["icon"] = final_icon
+        if icon: inner_payload["icon"] = icon
+        if url: inner_payload["url"] = url
+        if msg_id: inner_payload["id"] = str(msg_id)
+        if is_archive is not None: inner_payload["isArchive"] = 1 if is_archive else 0
+        if badge is not None: inner_payload["badge"] = int(badge)
+        if volume is not None: inner_payload["volume"] = float(volume)
+        if call: inner_payload["call"] = 1
+        if ttl is not None: inner_payload["ttl"] = int(ttl)
 
-        # 3. Action URL (Click destination)
-        if url:
-            payload["url"] = url
+        json_string = json.dumps(inner_payload, separators=(',', ':'))
 
-        # 4. Archive Toggle (1 = force save, 0 = do not save)
-        if is_archive is not None:
-            payload["isArchive"] = 1 if is_archive else 0
-
-        # 5. Badge Count (Application icon badge number)
-        if badge is not None:
+        if self.encryption:
             try:
-                payload["badge"] = int(badge)
-            except (ValueError, TypeError):
-                pass
+                ciphertext = self._encrypt_payload(json_string)
+                outer_payload = {
+                    "device_key": self.key,
+                    "ciphertext": ciphertext
+                }
+                if self.enc_iv and self.enc_mode != "ecb":
+                    outer_payload["iv"] = self.enc_iv
+            except Exception as enc_err:
+                return False, f"Encryption subsystem fault: {enc_err}"
+        else:
+            outer_payload = inner_payload
+            outer_payload["device_key"] = self.key
 
-        # 6. Sound Volume (Float or Int from 0 to 10)
-        if volume is not None:
-            try:
-                payload["volume"] = float(volume)
-            except (ValueError, TypeError):
-                pass
+        if verbose:
+            print("--- Outbound Payload ---")
+            print(json.dumps(outer_payload, indent=2))
 
-        # 7. Continuous Ringtone Alert
-        if call:
-            payload["call"] = 1
-
-        # 8. Time To Live (Auto-deletion expiration in seconds)
-        if ttl is not None:
-            try:
-                payload["ttl"] = int(ttl)
-            except (ValueError, TypeError):
-                pass
-
-        # 9. Payload Encryption Properties (AES-128-CBC / AES-256-CBC)
-        if ciphertext:
-            payload["ciphertext"] = str(ciphertext)
-        if iv:
-            payload["iv"] = str(iv)
-
-        # 10. ID
-        if msg_id:
-            payload["id"] = str(msg_id)
-
-
-        # 11. Process network transmission
         target_url = f"{self.server.rstrip('/')}/push"
-        req_data = json.dumps(payload).encode('utf-8')
+        req_data = json.dumps(outer_payload).encode('utf-8')
         req = urllib.request.Request(
             target_url, data=req_data,
             headers={'Content-Type': 'application/json; charset=utf-8'},
@@ -118,22 +154,78 @@ class BarkNotifier:
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 res_body = response.read().decode('utf-8')
+
+                if verbose:
+                    print("--- Inbound Response ---")
+                    print(f"HTTP Status: {response.status}")
+                    try:
+                        print(json.dumps(json.loads(res_body), indent=2))
+                    except ValueError:
+                        print(res_body)
+
                 res_json = json.loads(res_body)
                 if response.status == 200 and res_json.get("code") == 200:
                     return True, "Notification sent successfully"
                 return False, f"Server rejected: {res_body}"
+        except urllib.error.HTTPError as e:
+            res_body = e.read().decode('utf-8')
+            if verbose:
+                print("--- Inbound Response ---")
+                print(f"HTTP Status: {e.code}")
+                try:
+                    print(json.dumps(json.loads(res_body), indent=2))
+                except ValueError:
+                    print(res_body)
+            return False, f"Network HTTP Error {e.code}: {res_body}"
         except urllib.error.URLError as e:
             return False, f"Network request failed: {e}"
 
-    def delete(self, msg_id):
-        """
-        核心删除/撤回接口
-        必须包含 device_key, id, 并设置 delete="1"
-        """
-        if not msg_id: return False, "msg_id required"
+    def delete(self, msg_id, verbose=False):
+        if not msg_id:
+            return False, "Error: msg_id is required for deletion operation"
         payload = {
             "device_key": self.key,
             "id": str(msg_id),
             "delete": "1"
         }
-        return self._execute_request(payload)
+
+        if verbose:
+            print("--- Outbound Payload ---")
+            print(json.dumps(payload, indent=2))
+
+        target_url = f"{self.server.rstrip('/')}/push"
+        req_data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            target_url, data=req_data,
+            headers={'Content-Type': 'application/json; charset=utf-8'},
+            method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_body = response.read().decode('utf-8')
+
+                if verbose:
+                    print("--- Inbound Response ---")
+                    print(f"HTTP Status: {response.status}")
+                    try:
+                        print(json.dumps(json.loads(res_body), indent=2))
+                    except ValueError:
+                        print(res_body)
+
+                res_json = json.loads(res_body)
+                if response.status == 200 and res_json.get("code") == 200:
+                    return True, "Deletion message sent successfully"
+                return False, f"Server rejected: {res_body}"
+        except urllib.error.HTTPError as e:
+            res_body = e.read().decode('utf-8')
+            if verbose:
+                print("--- Inbound Response ---")
+                print(f"HTTP Status: {e.code}")
+                try:
+                    print(json.dumps(json.loads(res_body), indent=2))
+                except ValueError:
+                    print(res_body)
+            return False, f"Network HTTP Error {e.code}: {res_body}"
+        except urllib.error.URLError as e:
+            return False, f"Network request failed: {e}"
+
