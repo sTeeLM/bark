@@ -23,7 +23,10 @@ def main():
     # Core config overrides
     send_parser.add_argument("-k", "--key", type=str, default=None, help="Override Bark Device Key")
     send_parser.add_argument("--server", type=str, default=None, help="Override Bark server URL")
-    send_parser.add_argument("-v", "--verbose", action="store_true", help="Print the final outbound JSON payload before transmitting")
+    send_parser.add_argument("-v", "--verbose", action="store_true", help="Print outbound and inbound network payloads")
+
+    # Added Timestamp Override Option via CLI
+    send_parser.add_argument("--timestamp", type=str, default=None, choices=["true", "false"], help="Override timestamp prefix toggle")
 
     # Advanced encryption overrides via CLI
     send_parser.add_argument("--encryption", type=str, default=None, choices=["true", "false"], help="Override encryption toggle")
@@ -38,16 +41,17 @@ def main():
     send_parser.add_argument("-s", "--sound", type=str, default=None, help="Notification sound filename")
     send_parser.add_argument("-l", "--level", type=str, default=None,
                              choices=["active", "time_sensitive", "critical", "passive"],
-                             help="Notification interruption level")
+                             help="Notification level")
     send_parser.add_argument("--icon", type=str, default=None, help="Custom notification icon URL")
     send_parser.add_argument("--url", type=str, default=None, help="Action URL to open when clicked")
     send_parser.add_argument("--badge", type=int, default=None, help="Application badge number")
     send_parser.add_argument("--volume", type=float, default=None, help="Sound volume level (0 to 10)")
     send_parser.add_argument("--ttl", type=int, default=None, help="Time to live in seconds before expiration")
-    send_parser.add_argument("--id", type=str, default=None, help="Unique message identifier for future updates/deletions")
+    send_parser.add_argument("--id", type=str, default=None, help="Unique message identifier")
     send_parser.add_argument("--call", action="store_true", help="Enable continuous ringtone call alert")
-    send_parser.add_argument("--is-archive", type=int, choices=[0, 1], default=None,
-                             help="Force archive toggle (1 to save, 0 to skip)")
+
+    # Fixed: Added exact constraint bounds [0, 1] to prevent SyntaxError compiler crashes
+    send_parser.add_argument("--is-archive", type=int, choices=[0, 1], default=None, help="Force archive toggle")
 
     # ==================== SUBCOMMAND: DELETE ====================
     delete_parser = subparsers.add_parser("delete", help="Recall/Delete an existing notification from iOS device")
@@ -58,17 +62,18 @@ def main():
     # Core config overrides
     delete_parser.add_argument("-k", "--key", type=str, default=None, help="Override Bark Device Key")
     delete_parser.add_argument("--server", type=str, default=None, help="Override Bark server URL")
-    delete_parser.add_argument("-v", "--verbose", action="store_true", help="Print the final outbound JSON payload before transmitting")
+    delete_parser.add_argument("-v", "--verbose", action="store_true", help="Print outbound and inbound network payloads")
 
     # 3. Parse inputs according to strict subcommand positioning
     args = parser.parse_args()
 
-    # 4. Instantiate core library with full parameter context (Supports file config fallback)
+    # 4. Instantiate core library with full parameter context
     try:
         if args.command == "send":
             notifier = BarkNotifier(
                 key=args.key,
                 server=args.server,
+                timestamp=args.timestamp,
                 encryption=args.encryption,
                 enc_key=args.enc_key,
                 enc_iv=args.enc_iv,
@@ -100,7 +105,8 @@ def main():
             call=args.call,
             ttl=args.ttl,
             msg_id=args.id,
-            verbose=args.verbose
+            verbose=args.verbose,
+            timestamp=args.timestamp
         )
 
     elif args.command == "delete":

@@ -5,10 +5,13 @@ import configparser
 import urllib.request
 import urllib.error
 import subprocess
+import time
+from datetime import datetime
 
 class BarkNotifier:
     def __init__(self, key=None, server=None, title=None, group=None, sound=None, level=None,
-                 encryption=None, enc_key=None, enc_iv=None, enc_algo=None, enc_mode=None):
+                 encryption=None, enc_key=None, enc_iv=None, enc_algo=None, enc_mode=None,
+                 timestamp=None):
         config_path = "/etc/bark/bark.conf"
         config = configparser.ConfigParser()
         conf_data = {}
@@ -38,6 +41,9 @@ class BarkNotifier:
         raw_level = level or conf_data.get("level", "active")
         self.level = "timeSensitive" if raw_level == "time_sensitive" else raw_level
 
+        raw_ts = timestamp or conf_data.get("timestamp", "false")
+        self.timestamp = str(raw_ts).strip().lower() in ("true", "1", "yes", "on")
+
         raw_enc = encryption or conf_data.get("encryption", "false")
         self.encryption = str(raw_enc).strip().lower() in ("true", "1", "yes", "on")
 
@@ -47,67 +53,50 @@ class BarkNotifier:
         self.enc_mode = (enc_mode or conf_data.get("encryption_mechanism", "cbc")).strip().lower()
 
         if self.encryption:
-            algo_key_lengths = {
-                "aes128": 16,
-                "aes192": 24,
-                "aes256": 32
-            }
-
+            algo_key_lengths = {"aes128": 16, "aes192": 24, "aes256": 32}
             if self.enc_algo not in algo_key_lengths:
-                raise ValueError(f"Error: Unsupported encryption_algorithm '{self.enc_algo}'. Must be aes128, aes192, or aes256.")
-
+                raise ValueError(f"Error: Unsupported encryption_algorithm '{self.enc_algo}'.")
             expected_key_len = algo_key_lengths[self.enc_algo]
-            actual_key_len = len(self.enc_key.encode('utf-8'))
-
-            if actual_key_len != expected_key_len:
-                raise ValueError(f"Error: Encryption key for '{self.enc_algo}' must be exactly {expected_key_len} bytes long. Current length: {actual_key_len} bytes.")
-
-            if self.enc_mode != "ecb":
-                expected_iv_len = 16
-                actual_iv_len = len(self.enc_iv.encode('utf-8'))
-                if actual_iv_len != expected_iv_len:
-                    raise ValueError(f"Error: IV for '{self.enc_mode}' mode must be exactly {expected_iv_len} bytes long. Current length: {actual_iv_len} bytes.")
+            if len(self.enc_key.encode('utf-8')) != expected_key_len:
+                raise ValueError(f"Error: Encryption key for '{self.enc_algo}' must be exactly {expected_key_len} bytes.")
+            if self.enc_mode != "ecb" and len(self.enc_iv.encode('utf-8')) != 16:
+                raise ValueError(f"Error: IV for '{self.enc_mode}' mode must be exactly 16 bytes.")
 
     def _encrypt_payload(self, plaintext_json):
         algo_mapping = {"aes128": "aes-128", "aes192": "aes-192", "aes256": "aes-256"}
-        base_algo = algo_mapping.get(self.enc_algo, "aes-256")
-        openssl_cipher = f"-{base_algo}-{self.enc_mode}"
-
+        openssl_cipher = f"-{algo_mapping.get(self.enc_algo, 'aes-256')}-{self.enc_mode}"
         has_iv = self.enc_mode != "ecb"
-        hex_key = self.enc_key.encode('utf-8').hex()
-        hex_iv = self.enc_iv.encode('utf-8').hex() if has_iv else ""
-
-        cmd = ["openssl", "enc", openssl_cipher, "-K", hex_key]
-        if has_iv and hex_iv:
-            cmd.extend(["-iv", hex_iv])
+        cmd = ["openssl", "enc", openssl_cipher, "-K", self.enc_key.encode('utf-8').hex()]
+        if has_iv and self.enc_iv:
+            cmd.extend(["-iv", self.enc_iv.encode('utf-8').hex()])
         cmd.extend(["-base64", "-A"])
-
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout_bytes, stderr_bytes = proc.communicate(input=plaintext_json.encode('utf-8'))
-
             if proc.returncode != 0:
-                raise RuntimeError(f"OpenSSL internal crash: {stderr_bytes.decode('utf-8').strip()}")
-
+                raise RuntimeError(stderr_bytes.decode('utf-8').strip())
             return stdout_bytes.decode('utf-8').strip()
         except Exception as err:
             raise RuntimeError(f"Failed to execute cryptography subsystem: {err}")
 
     def send(self, body, title=None, group=None, sound=None, level=None, icon=None,
              url=None, is_archive=None, badge=None, volume=None, call=False, ttl=None, msg_id=None,
-             verbose=False):
+             verbose=False, timestamp=None):
 
         raw_level = level or self.level
         final_level = "timeSensitive" if raw_level == "time_sensitive" else raw_level
 
+        final_ts_toggle = self.timestamp if timestamp is None else (str(timestamp).strip().lower() in ("true", "1", "yes", "on"))
+
+        final_body = str(body)
+        if final_ts_toggle:
+            tz_name = time.tzname[0].upper()
+            time_prefix = datetime.now().strftime(f"[{tz_name} %Y-%m-%d %H:%M:%S] ")
+            final_body = f"{time_prefix}{final_body}"
+
         inner_payload = {
             "title": title or self.title,
-            "body": str(body),
+            "body": final_body,
             "group": group or self.group,
             "sound": sound or self.sound,
             "level": final_level
@@ -127,10 +116,7 @@ class BarkNotifier:
         if self.encryption:
             try:
                 ciphertext = self._encrypt_payload(json_string)
-                outer_payload = {
-                    "device_key": self.key,
-                    "ciphertext": ciphertext
-                }
+                outer_payload = {"device_key": self.key, "ciphertext": ciphertext}
                 if self.enc_iv and self.enc_mode != "ecb":
                     outer_payload["iv"] = self.enc_iv
             except Exception as enc_err:
@@ -145,11 +131,7 @@ class BarkNotifier:
 
         target_url = f"{self.server.rstrip('/')}/push"
         req_data = json.dumps(outer_payload).encode('utf-8')
-        req = urllib.request.Request(
-            target_url, data=req_data,
-            headers={'Content-Type': 'application/json; charset=utf-8'},
-            method='POST'
-        )
+        req = urllib.request.Request(target_url, data=req_data, headers={'Content-Type': 'application/json'}, method='POST')
 
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
@@ -182,24 +164,14 @@ class BarkNotifier:
 
     def delete(self, msg_id, verbose=False):
         if not msg_id:
-            return False, "Error: msg_id is required for deletion operation"
-        payload = {
-            "device_key": self.key,
-            "id": str(msg_id),
-            "delete": "1"
-        }
-
+            return False, "Error: msg_id is required"
+        payload = {"device_key": self.key, "id": str(msg_id), "delete": "1"}
         if verbose:
             print("--- Outbound Payload ---")
             print(json.dumps(payload, indent=2))
-
         target_url = f"{self.server.rstrip('/')}/push"
         req_data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            target_url, data=req_data,
-            headers={'Content-Type': 'application/json; charset=utf-8'},
-            method='POST'
-        )
+        req = urllib.request.Request(target_url, data=req_data, headers={'Content-Type': 'application/json'}, method='POST')
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 res_body = response.read().decode('utf-8')
